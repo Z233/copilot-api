@@ -13,8 +13,8 @@ const USER_AGENT = `GitHubCopilotChat/${COPILOT_VERSION}`
 
 const API_VERSION = "2025-10-01"
 
-export const copilotBaseUrl = (state: State) =>
-  `https://api.${state.accountType}.githubcopilot.com`
+export const copilotBaseUrl = (_state: State) =>
+  "https://api.business.githubcopilot.com"
 
 export const copilotHeaders = (state: State, vision: boolean = false) => {
   const headers: Record<string, string> = {
@@ -28,6 +28,7 @@ export const copilotHeaders = (state: State, vision: boolean = false) => {
     "x-github-api-version": API_VERSION,
     "x-request-id": randomUUID(),
     "x-vscode-user-agent-library-version": "electron-fetch",
+    "x-interaction-type": "conversation-agent",
   }
 
   if (vision) headers["copilot-vision-request"] = "true"

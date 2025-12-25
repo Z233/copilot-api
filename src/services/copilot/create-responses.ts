@@ -326,6 +326,54 @@ interface ResponsesRequestOptions {
   initiator: "agent" | "user"
 }
 
+const executeFetchRequest = async (
+  payload: ResponsesPayload,
+  headers: Record<string, string>,
+  baseUrl: string,
+): Promise<Response> => {
+  return await fetch(`${baseUrl}/responses`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+  })
+}
+
+const createPayloadWithContinue = (
+  originalPayload: ResponsesPayload,
+): ResponsesPayload => {
+  const continueMessage: ResponseInputMessage = {
+    type: "message",
+    role: "user",
+    content: `CONTINUE_${Date.now()}`,
+  }
+
+  if (typeof originalPayload.input === "string") {
+    return {
+      ...originalPayload,
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: originalPayload.input,
+        } as ResponseInputMessage,
+        continueMessage,
+      ],
+    }
+  }
+
+  if (Array.isArray(originalPayload.input)) {
+    return {
+      ...originalPayload,
+      input: [...originalPayload.input, continueMessage],
+    }
+  }
+
+  return {
+    ...originalPayload,
+    input: [continueMessage],
+  }
+}
+
 export const createResponses = async (
   payload: ResponsesPayload,
   { vision, initiator }: ResponsesRequestOptions,
@@ -340,11 +388,23 @@ export const createResponses = async (
   // service_tier is not supported by github copilot
   payload.service_tier = null
 
-  const response = await fetch(`${copilotBaseUrl(state)}/responses`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(payload),
-  })
+  const baseUrl = copilotBaseUrl(state)
+
+  let response = await executeFetchRequest(payload, headers, baseUrl)
+
+  if (!response.ok && response.status === 500) {
+    consola.warn(
+      "Received 500 Internal Server Error, retrying with CONTINUE message",
+    )
+
+    const retryPayload = createPayloadWithContinue(payload)
+    response = await executeFetchRequest(retryPayload, headers, baseUrl)
+
+    if (!response.ok && response.status === 500) {
+      consola.error("Retry with CONTINUE also failed with 500 error", response)
+      throw new HTTPError("Failed to create responses after retry", response)
+    }
+  }
 
   if (!response.ok) {
     consola.error("Failed to create responses", response)
