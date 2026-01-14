@@ -31,6 +31,9 @@ import {
 import {
   type AnthropicMessagesPayload,
   type AnthropicStreamState,
+  type AnthropicTextBlock,
+  type AnthropicToolResultBlock,
+  type AnthropicUserContentBlock,
 } from "./anthropic-types"
 import {
   translateToAnthropic,
@@ -53,6 +56,11 @@ export async function handleCompletion(c: Context) {
   if (anthropicBeta && noTools) {
     anthropicPayload.model = getSmallModel()
   }
+
+  // Merge tool_result and text blocks into tool_result to avoid consuming premium requests
+  // (caused by skill invocations, edit hooks or to do reminders)
+  // e.g. {"role":"user","content":[{"type":"tool_result","content":"Launching skill: xxx"},{"type":"text","text":"xxx"}]}
+  mergeToolResultForClaude(anthropicBeta, anthropicPayload)
 
   const useResponsesApi = shouldUseResponsesApi(anthropicPayload.model)
 
@@ -226,3 +234,70 @@ const isNonStreaming = (
 const isAsyncIterable = <T>(value: unknown): value is AsyncIterable<T> =>
   Boolean(value)
   && typeof (value as AsyncIterable<T>)[Symbol.asyncIterator] === "function"
+
+const formatTextForSkill = (toolContent: string, text: string): string =>
+  toolContent.startsWith("Launching skill") ?
+    `Please execute skill now:${text}`
+  : text
+
+type ToolResultWithText = AnthropicToolResultBlock & { content: string }
+
+const isToolResultWithText = (
+  block: AnthropicUserContentBlock,
+): block is ToolResultWithText =>
+  block.type === "tool_result" && typeof block.content === "string"
+
+const mergeToolResultForClaude = (
+  anthropicBeta: string | undefined,
+  anthropicPayload: AnthropicMessagesPayload,
+): void => {
+  if (!anthropicBeta) return
+
+  for (const msg of anthropicPayload.messages) {
+    if (msg.role !== "user" || !Array.isArray(msg.content)) continue
+
+    const toolResults: Array<ToolResultWithText> = []
+    const textBlocks: Array<AnthropicTextBlock> = []
+    let valid = true
+
+    for (const block of msg.content) {
+      if (isToolResultWithText(block)) {
+        toolResults.push(block)
+      } else if (block.type === "text") {
+        textBlocks.push(block)
+      } else {
+        valid = false
+        break
+      }
+    }
+
+    if (!valid || toolResults.length === 0 || textBlocks.length === 0) continue
+
+    msg.content = mergeToolResult(toolResults, textBlocks)
+  }
+}
+
+const mergeToolResult = (
+  toolResults: Array<ToolResultWithText>,
+  textBlocks: Array<AnthropicTextBlock>,
+): Array<AnthropicToolResultBlock> => {
+  // equal lengths -> pairwise merge
+  if (toolResults.length === textBlocks.length) {
+    return toolResults.map((tr, i) => ({
+      ...tr,
+      content: `${tr.content}\n\n${formatTextForSkill(tr.content, textBlocks[i].text)}`,
+    }))
+  }
+
+  // lengths differ -> append all textBlocks to the last tool_result
+  const last = toolResults.at(-1)
+  if (!last) return toolResults
+  const appendedTexts = textBlocks
+    .map((tb) => formatTextForSkill(last.content, tb.text))
+    .join("\n\n")
+
+  return [
+    ...toolResults.slice(0, -1),
+    { ...last, content: `${last.content}\n\n${appendedTexts}` },
+  ]
+}
